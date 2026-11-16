@@ -1,0 +1,40 @@
+name: Deploy backend
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Configured GitHub environment
+        type: choice
+        required: true
+        options: [staging, production]
+permissions:
+  contents: read
+concurrency:
+  group: backend-${{ inputs.environment }}
+  cancel-in-progress: false
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: ${{ inputs.environment }}
+    env:
+      SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+      SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
+      SUPABASE_PROJECT_REF: ${{ vars.SUPABASE_PROJECT_REF }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 24
+      - name: Check deployment configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$SUPABASE_ACCESS_TOKEN" || { echo 'Missing SUPABASE_ACCESS_TOKEN'; exit 1; }
+          test -n "$SUPABASE_DB_PASSWORD" || { echo 'Missing SUPABASE_DB_PASSWORD'; exit 1; }
+          test -n "$SUPABASE_PROJECT_REF" || { echo 'Missing SUPABASE_PROJECT_REF'; exit 1; }
+      - run: npx --yes supabase@3.1.0 link --project-ref "$SUPABASE_PROJECT_REF" --yes
+      - run: npx --yes supabase@3.1.0 db push --remote --dry-run
+      - run: npx --yes supabase@3.1.0 db push --remote --yes
+      - run: npx --yes supabase@3.1.0 functions deploy device-access --remote="$SUPABASE_PROJECT_REF" --use-api --yes
+      - run: npx --yes supabase@3.1.0 functions deploy send-push --remote="$SUPABASE_PROJECT_REF" --use-api --yes

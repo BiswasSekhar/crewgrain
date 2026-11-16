@@ -1,0 +1,204 @@
+name: Database backup
+
+# Free daily backup for a Supabase Free project (which has no backups of its own).
+# Backups are stored ONLY in a private Cloudflare R2 bucket, never in GitHub.
+#
+# Repository secrets needed (Settings > Secrets and variables > Actions):
+#   SUPABASE_DB_URL        database connection string (Supabase session pooler is best)
+#   BACKUP_PASSPHRASE      long random text; keep a copy somewhere safe
+#   R2_ACCOUNT_ID, R2_BUCKET, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY
+#                          private R2 bucket; set a lifecycle rule there to expire
+#                          files after about 365 days
+#
+# Every run: dump (public + auth schemas) -> gzip -> encrypt -> decrypt again and
+# restore into a throwaway Postgres -> check the restored data -> upload the
+# encrypted file to R2 and confirm its size. Any failure fails the run and GitHub
+# emails the repo owner. A backup that failed the restore check is never uploaded.
+on:
+  schedule:
+    - cron: "30 20 * * *" # 02:00 India time
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: database-backup
+  cancel-in-progress: false
+
+jobs:
+  backup:
+    if: vars.ENABLE_BACKUPS == 'true'
+    environment: production
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+      BACKUP_PASSPHRASE: ${{ secrets.BACKUP_PASSPHRASE }}
+      R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+      R2_BUCKET: ${{ secrets.R2_BUCKET }}
+      AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      AWS_DEFAULT_REGION: auto
+      PG_IMAGE: postgres:17-alpine
+    steps:
+      - name: Check secrets
+        run: |
+          set -euo pipefail
+          if [ -z "$SUPABASE_DB_URL" ]; then
+            echo "::error::Repository secret SUPABASE_DB_URL is missing."
+            exit 1
+          fi
+          if [ -z "$BACKUP_PASSPHRASE" ]; then
+            echo "::error::Repository secret BACKUP_PASSPHRASE is missing."
+            exit 1
+          fi
+          if [ -z "$R2_ACCOUNT_ID" ] || [ -z "$R2_BUCKET" ] || [ -z "$AWS_ACCESS_KEY_ID" ] || [ -z "$AWS_SECRET_ACCESS_KEY" ]; then
+            echo "::error::Cloudflare R2 secrets are missing (R2_ACCOUNT_ID, R2_BUCKET, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY). Backups are stored only in R2."
+            exit 1
+          fi
+          case "$SUPABASE_DB_URL" in
+            postgres://*|postgresql://*) ;;
+            *) echo "::error::SUPABASE_DB_URL must start with postgresql://"; exit 1 ;;
+          esac
+          if [ "${#BACKUP_PASSPHRASE}" -lt 12 ]; then
+            echo "::error::BACKUP_PASSPHRASE is too short (use at least 12 characters)."
+            exit 1
+          fi
+
+      - name: Dump and encrypt
+        id: dump
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          # File is named after the India date, since the run starts after midnight there.
+          day="$(TZ=Asia/Kolkata date +%F)"
+          name="crewgrain-${day}.sql.gz.gpg"
+
+          # Full copy of the app data (public) and the sign-in accounts (auth).
+          # pipefail makes a failed pg_dump fail the whole pipeline.
+          docker run --rm -e SUPABASE_DB_URL "$PG_IMAGE" \
+            sh -c 'pg_dump --no-owner --no-privileges --schema=public --schema=auth "$SUPABASE_DB_URL"' \
+            | gzip -9 > out/backup.sql.gz
+
+          gzip -t out/backup.sql.gz
+          size="$(stat -c %s out/backup.sql.gz)"
+          echo "Compressed dump: ${size} bytes"
+          if [ "$size" -lt 10000 ]; then
+            echo "::error::Dump is suspiciously small (${size} bytes)."
+            exit 1
+          fi
+
+          # The passphrase goes in on file descriptor 3, not on the command line.
+          gpg --batch --yes --quiet --pinentry-mode loopback --passphrase-fd 3 \
+            --symmetric --cipher-algo AES256 \
+            -o "out/${name}" out/backup.sql.gz 3<<<"$BACKUP_PASSPHRASE"
+          rm out/backup.sql.gz
+
+          echo "file=${name}" >> "$GITHUB_OUTPUT"
+
+      - name: Restore into a throwaway Postgres
+        env:
+          FILE: ${{ steps.dump.outputs.file }}
+        run: |
+          set -euo pipefail
+          docker run -d --name verify -e POSTGRES_PASSWORD=verify "$PG_IMAGE" >/dev/null
+          for i in $(seq 1 30); do
+            if docker exec verify pg_isready -U postgres >/dev/null 2>&1; then break; fi
+            sleep 2
+          done
+          docker exec verify pg_isready -U postgres
+
+          # Supabase's own roles and the extensions schema do not exist in plain
+          # Postgres. Create stand-ins so policies and defaults can be restored.
+          docker exec -i verify psql -U postgres -v ON_ERROR_STOP=1 -q <<'SQL'
+          create role anon nologin;
+          create role authenticated nologin;
+          create role service_role nologin bypassrls;
+          create role authenticator noinherit login;
+          create role supabase_auth_admin nologin;
+          create role supabase_admin nologin;
+          create role dashboard_user nologin;
+          create role pgbouncer login;
+          create schema if not exists extensions;
+          SQL
+          # Extensions Supabase keeps in the extensions schema (not fatal if absent).
+          docker exec verify psql -U postgres -q -c 'create extension if not exists pgcrypto with schema extensions' || true
+          docker exec verify psql -U postgres -q -c 'create extension if not exists "uuid-ossp" with schema extensions' || true
+
+          # Decrypt again (proves the passphrase works) and restore.
+          gpg --batch --quiet --pinentry-mode loopback --passphrase-fd 3 \
+              -d "out/${FILE}" 3<<<"$BACKUP_PASSPHRASE" \
+            | gunzip \
+            | docker exec -i verify psql -U postgres -q > restore.out 2> restore.err
+
+          errors="$(grep -c 'ERROR:' restore.err || true)"
+          echo "Restore finished with ${errors} error line(s)."
+          if [ "$errors" -gt 0 ]; then
+            echo "::warning::Restore reported ${errors} error(s); first ones below. The data check decides pass or fail."
+            grep 'ERROR:' restore.err | head -n 20
+          fi
+
+      - name: Check restored data
+        run: |
+          set -euo pipefail
+          live() { docker run --rm -e SUPABASE_DB_URL "$PG_IMAGE" \
+            sh -c 'psql "$SUPABASE_DB_URL" -Atq -c "$1"' _ "$1"; }
+          copy() { docker exec verify psql -U postgres -Atq -c "$1"; }
+
+          fail=0
+          check() {
+            # $1 = table. Must exist in the copy; copy must hold at least 90% of live rows.
+            local t="$1" sql l r
+            sql="select count(*) from ${t}"
+            l="$(live "$sql")" || { echo "::error::Cannot count ${t} on the live database"; fail=1; return; }
+            r="$(copy "$sql")" || { echo "::error::${t} is missing from the restored copy"; fail=1; return; }
+            echo "${t}: live=${l} restored=${r}"
+            if [ "$l" -gt 0 ] && [ "$((r * 10))" -lt "$((l * 9))" ]; then
+              echo "::error::${t} restored too few rows"
+              fail=1
+            fi
+          }
+          for t in public.profiles public.units public.daily_counts public.count_events public.audit_log auth.users; do
+            check "$t"
+          done
+
+          # Same number of tables in the app schema.
+          tsql="select count(*) from information_schema.tables where table_schema='public' and table_type='BASE TABLE'"
+          lt="$(live "$tsql")"; rt="$(copy "$tsql")"
+          echo "public tables: live=${lt} restored=${rt}"
+          if [ "$lt" != "$rt" ]; then echo "::error::Table count differs"; fail=1; fi
+
+          # The two things the app cannot live without must not be empty.
+          for t in public.profiles public.units; do
+            if [ "$(copy "select count(*) from ${t}")" -lt 1 ] 2>/dev/null; then
+              echo "::error::${t} is empty after restore"; fail=1
+            fi
+          done
+
+          docker rm -f verify >/dev/null 2>&1 || true
+          if [ "$fail" -ne 0 ]; then
+            echo "::error::Backup check FAILED. Do not rely on this backup."
+            exit 1
+          fi
+          echo "Backup restored and checked OK."
+
+      # Only a backup that restored and passed the data check is uploaded.
+      - name: Copy to Cloudflare R2
+        env:
+          FILE: ${{ steps.dump.outputs.file }}
+        run: |
+          set -euo pipefail
+          endpoint="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
+          local_size="$(stat -c %s "out/${FILE}")"
+          aws s3 cp "out/${FILE}" "s3://${R2_BUCKET}/daily/${FILE}" \
+            --endpoint-url "$endpoint" --only-show-errors
+          # Confirm the stored object is the same size as what was uploaded.
+          remote_size="$(aws s3api head-object --bucket "$R2_BUCKET" \
+            --key "daily/${FILE}" --endpoint-url "$endpoint" \
+            --query ContentLength --output text)"
+          if [ "$remote_size" != "$local_size" ]; then
+            echo "::error::R2 copy size differs (local ${local_size}, remote ${remote_size})."
+            exit 1
+          fi
+          echo "Copied to R2: daily/${FILE} (${remote_size} bytes)."

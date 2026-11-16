@@ -1,0 +1,14 @@
+name: Feature proposal
+description: Describe a business workflow or improvement
+body:
+  - type: textarea
+    attributes:
+      label: User and problem
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Expected workflow and boundaries
+      description: Include permissions, offline behavior, industry and alternatives where relevant.
+    validations:
+      required: true

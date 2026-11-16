@@ -1,0 +1,150 @@
+name: Release APK
+
+# Builds a release-signed Android APK (no Google Play, no Expo cloud) and
+# publishes it as a GitHub Release. See docs/RELEASE-APK.md.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+concurrency:
+  group: release-apk-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    environment: production
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      CREWGRAIN_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+      CREWGRAIN_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+      CREWGRAIN_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+      EXPO_PUBLIC_SUPABASE_URL: ${{ vars.EXPO_PUBLIC_SUPABASE_URL }}
+      EXPO_PUBLIC_SUPABASE_PUBLISHABLE_KEY: ${{ vars.EXPO_PUBLIC_SUPABASE_PUBLISHABLE_KEY }}
+      EXPO_PUBLIC_WEB_ORIGIN: ${{ vars.EXPO_PUBLIC_WEB_ORIGIN }}
+      EXPO_PUBLIC_SENTRY_DSN: ${{ vars.EXPO_PUBLIC_SENTRY_DSN }}
+      SENTRY_DISABLE_AUTO_UPLOAD: "true"
+      # Where the release is published. Default: this repository.
+      RELEASE_REPO: ${{ vars.RELEASE_REPO || github.repository }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: "24"
+          cache: npm
+
+      - name: Check the tag matches app.json
+        id: version
+        run: |
+          VERSION=$(node -p "require('./app.json').expo.version")
+          EXPECTED="v${VERSION}"
+          if [ "${GITHUB_REF_TYPE}" = "tag" ] && [ "${GITHUB_REF_NAME}" != "${EXPECTED}" ]; then
+            echo "::error::Tag ${GITHUB_REF_NAME} does not match app.json version (expected ${EXPECTED}). Bump version in app.json or fix the tag."
+            exit 1
+          fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag=${EXPECTED}" >> "$GITHUB_OUTPUT"
+
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm test
+
+      - name: Decode the signing keystore
+        run: |
+          if [ -z "$KEYSTORE_B64" ]; then
+            echo "::error::Secret ANDROID_KEYSTORE_BASE64 is not set."
+            exit 1
+          fi
+          printf '%s' "$KEYSTORE_B64" | base64 --decode > "$RUNNER_TEMP/crewgrain-release.p12"
+          echo "CREWGRAIN_KEYSTORE_PATH=$RUNNER_TEMP/crewgrain-release.p12" >> "$GITHUB_ENV"
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+
+      # Optional: Firebase client config so the app can receive push notifications.
+      # Skipped (not failed) when the secret is not set.
+      - name: Add Firebase config
+        run: |
+          if [ -z "$GOOGLE_SERVICES_B64" ]; then
+            echo "::notice::GOOGLE_SERVICES_JSON_BASE64 is not set; building without push."
+            exit 0
+          fi
+          # Strip any stray whitespace or line breaks the secret may have picked up.
+          # A bad or wrong file must never block the release: warn and build
+          # without push instead.
+          if printf '%s' "$GOOGLE_SERVICES_B64" | tr -d '[:space:]' | base64 --decode > google-services.json 2>/dev/null \
+            && node -e "const j=JSON.parse(require('fs').readFileSync('google-services.json','utf8'));const ok=(j.client||[]).some(c=>c.client_info&&c.client_info.android_client_info&&c.client_info.android_client_info.package_name==='io.github.biswassekhar.crewgrain');if(!ok)process.exit(1)"; then
+            echo "Firebase config added for io.github.biswassekhar.crewgrain."
+          else
+            rm -f google-services.json
+            echo "::warning::GOOGLE_SERVICES_JSON_BASE64 is invalid or is for another app; building without push. Re-save it from the Crewgrain Firebase project."
+          fi
+        env:
+          GOOGLE_SERVICES_B64: ${{ secrets.GOOGLE_SERVICES_JSON_BASE64 }}
+
+      - name: Build the release APK
+        run: node scripts/build-android-apk.mjs
+
+      - name: Verify the signature again
+        run: |
+          APKSIGNER=$(ls -d "$ANDROID_HOME"/build-tools/*/apksigner | sort -V | tail -n 1)
+          APK="outputs/android/crewgrain-${{ steps.version.outputs.version }}.apk"
+          "$APKSIGNER" verify --print-certs "$APK" | tee "$RUNNER_TEMP/certs.txt"
+          if grep -qi "Android Debug" "$RUNNER_TEMP/certs.txt"; then
+            echo "::error::APK is signed with the debug certificate."
+            exit 1
+          fi
+          (cd outputs/android && sha256sum -c "crewgrain-${{ steps.version.outputs.version }}.apk.sha256")
+
+      - name: Write release notes
+        run: |
+          node -e '
+            const i = require("./outputs/android/build-info.json");
+            const t = [
+              "## Crewgrain " + i.version,
+              "",
+              "- Version: " + i.version + " (versionCode " + i.versionCode + ")",
+              "- Package: `" + i.package + "`",
+              "- Phones: " + i.architectures.join(", "),
+              "- APK SHA-256: `" + i.sha256 + "`",
+              "- Signing certificate SHA-256: `" + i.signingCertificateSha256 + "`",
+              "- Signing certificate: " + i.signingCertificateSubject,
+              "",
+              "Install: download `crewgrain-" + i.version + ".apk`, open it, allow installing from this browser once, tap Install.",
+              "Verify: the certificate fingerprint above must be the same in every release (see docs/RELEASE-APK.md)."
+            ].join("\n");
+            require("fs").writeFileSync(process.env.RUNNER_TEMP + "/notes.md", t + "\n");
+          '
+
+      - name: Publish the GitHub Release
+        env:
+          GH_TOKEN: ${{ (vars.RELEASE_REPO && vars.RELEASE_REPO != github.repository) && secrets.RELEASE_TOKEN || github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::error::RELEASE_REPO points to another repository but secret RELEASE_TOKEN is not set."
+            exit 1
+          fi
+          FILES=("outputs/android/crewgrain-${VERSION}.apk" "outputs/android/crewgrain-${VERSION}.apk.sha256" "outputs/android/build-info.json")
+          if gh release view "$TAG" --repo "$RELEASE_REPO" >/dev/null 2>&1; then
+            gh release upload "$TAG" "${FILES[@]}" --repo "$RELEASE_REPO" --clobber
+            gh release edit "$TAG" --repo "$RELEASE_REPO" --notes-file "$RUNNER_TEMP/notes.md"
+          else
+            gh release create "$TAG" "${FILES[@]}" --repo "$RELEASE_REPO" \
+              --title "Crewgrain ${VERSION}" --notes-file "$RUNNER_TEMP/notes.md"
+          fi
+
+      - name: Remove the decoded keystore
+        if: always()
+        run: rm -f "$RUNNER_TEMP/crewgrain-release.p12"

@@ -1,0 +1,30 @@
+project_id = "crewgrain-production-tracker"
+
+[api]
+enabled = true
+port = 54321
+schemas = ["public", "graphql_public"]
+extra_search_path = ["public", "extensions"]
+max_rows = 1000
+
+[db]
+port = 54322
+major_version = 17
+
+[studio]
+enabled = true
+port = 54323
+
+[auth]
+enabled = true
+site_url = "http://localhost:8081"
+additional_redirect_urls = ["crewgrain://**"]
+enable_signup = false
+
+[functions.device-access]
+verify_jwt = false
+# Staff ID/phone login is throttled in the function; admin JWTs and device tokens are verified there.
+
+[functions.send-push]
+verify_jwt = false
+# Admin, device and scheduled callers are authenticated inside the function.

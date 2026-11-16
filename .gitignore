@@ -1,0 +1,68 @@
+# Learn more https://docs.github.com/en/get-started/getting-started-with-git/ignoring-files
+
+# dependencies
+node_modules/
+
+# Expo
+.expo/
+dist/
+web-build/
+expo-env.d.ts
+
+# Native
+.kotlin/
+*.orig.*
+*.jks
+*.p8
+*.p12
+*.key
+*.mobileprovision
+
+# Metro
+.metro-health-check*
+
+# debug
+npm-debug.*
+yarn-debug.*
+yarn-error.*
+
+# macOS
+.DS_Store
+*.pem
+
+# local env files
+.env*.local
+.env
+.env.*
+!.env.example
+supabase/.temp/
+supabase/.branches/
+outputs/
+
+# typescript
+*.tsbuildinfo
+
+# generated native folders
+/ios
+/android
+
+# local tooling
+.claude/
+
+# Play Store / Firebase service account keys (never commit)
+secrets/
+
+# Android release signing (never commit keystores or passwords)
+*.keystore
+*.pfx
+keystore.properties
+*.keystore.base64
+
+# Firebase client config (comes from a GitHub secret in releases)
+google-services.json
+
+# Invoices stay out of the repo
+invoice/
+
+# Personal data (staff phone numbers and IDs) stays out of git
+private/

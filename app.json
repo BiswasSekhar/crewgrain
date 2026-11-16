@@ -1,0 +1,75 @@
+{
+  "expo": {
+    "name": "Crewgrain",
+    "slug": "crewgrain",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "icon": "./assets/crewgrain-icon.png",
+    "userInterfaceStyle": "light",
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "io.github.biswassekhar.crewgrain",
+      "buildNumber": "1"
+    },
+    "android": {
+      "adaptiveIcon": {
+        "backgroundColor": "#202731",
+        "foregroundImage": "./assets/crewgrain-mark.png",
+        "monochromeImage": "./assets/crewgrain-monochrome.png"
+      },
+      "predictiveBackGestureEnabled": false,
+      "package": "io.github.biswassekhar.crewgrain",
+      "versionCode": 1,
+      "softwareKeyboardLayoutMode": "resize",
+      "blockedPermissions": [
+        "android.permission.READ_EXTERNAL_STORAGE",
+        "android.permission.WRITE_EXTERNAL_STORAGE",
+        "android.permission.SYSTEM_ALERT_WINDOW"
+      ]
+    },
+    "web": {
+      "bundler": "metro",
+      "favicon": "./assets/crewgrain-favicon.png",
+      "output": "single",
+      "name": "Crewgrain",
+      "shortName": "Crewgrain",
+      "description": "Daily work, production records and approvals for your team."
+    },
+    "plugins": [
+      "expo-router",
+      "expo-sqlite",
+      "expo-secure-store",
+      "expo-sharing",
+      "expo-font",
+      [
+        "expo-splash-screen",
+        {
+          "image": "./assets/crewgrain-splash.png",
+          "imageWidth": 144,
+          "resizeMode": "contain",
+          "backgroundColor": "#FFFFFF"
+        }
+      ],
+      "./plugins/withAndroidCmake.cjs",
+      "./plugins/withReleaseSigning.cjs",
+      [
+        "expo-notifications",
+        {
+          "icon": "./assets/crewgrain-monochrome.png",
+          "color": "#202731",
+          "defaultChannel": "default"
+        }
+      ],
+      "@sentry/react-native"
+    ],
+    "runtimeVersion": {
+      "policy": "appVersion"
+    },
+    "scheme": "crewgrain",
+    "backgroundColor": "#FFFFFF",
+    "primaryColor": "#202731",
+    "updates": {
+      "enabled": false
+    }
+  }
+}

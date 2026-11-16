@@ -1,0 +1,91 @@
+name: Service control
+
+# The vendor's pause button. Pauses or resumes the whole service for every
+# account, or shows a notice banner first. Run it from the Actions tab.
+# Uses the same repository secret as the backup: SUPABASE_DB_URL (the database
+# owner's connection string). Clients' own admins cannot do this.
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "status = just look; warn = show a notice; suspend = stop everything; resume = back to normal"
+        type: choice
+        required: true
+        options:
+          - status
+          - warn
+          - suspend
+          - resume
+      message:
+        description: "Message people see (optional, up to 300 characters)"
+        type: string
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: service-control
+  cancel-in-progress: false
+
+jobs:
+  control:
+    if: vars.ENABLE_SERVICE_CONTROL == 'true'
+    environment: production
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+      # Inputs go in through the environment only, never into a command line.
+      ACTION: ${{ inputs.action }}
+      MESSAGE: ${{ inputs.message }}
+      PG_IMAGE: postgres:17-alpine
+    steps:
+      - name: Check inputs
+        run: |
+          set -euo pipefail
+          if [ -z "$SUPABASE_DB_URL" ]; then
+            echo "::error::Repository secret SUPABASE_DB_URL is missing."
+            exit 1
+          fi
+          case "$SUPABASE_DB_URL" in
+            postgres://*|postgresql://*) ;;
+            *) echo "::error::SUPABASE_DB_URL must start with postgresql://"; exit 1 ;;
+          esac
+          case "$ACTION" in
+            status|warn|suspend|resume) ;;
+            *) echo "::error::Unknown action."; exit 1 ;;
+          esac
+          if [ "${#MESSAGE}" -gt 300 ]; then
+            echo "::error::The message is longer than 300 characters (${#MESSAGE})."
+            exit 1
+          fi
+
+      - name: Apply and report
+        run: |
+          set -euo pipefail
+          case "$ACTION" in
+            resume)  STATE=active ;;
+            warn)    STATE=warning ;;
+            suspend) STATE=suspended ;;
+            *)       STATE= ;;
+          esac
+          export STATE
+
+          # State and message reach psql as variables (-v) and are quoted by psql
+          # itself with :'name'. They are never written into the SQL text or into
+          # a command. The SQL goes in on stdin because psql only substitutes
+          # variables there (not in -c).
+          if [ -n "$STATE" ]; then
+            docker run --rm -i -e SUPABASE_DB_URL -e STATE -e MESSAGE "$PG_IMAGE" \
+              sh -c 'psql "$SUPABASE_DB_URL" -v ON_ERROR_STOP=1 -X -q -At -v "state=$STATE" -v "msg=$MESSAGE" >/dev/null' <<'SQL'
+          select private.set_service_state(:'state', :'msg');
+          SQL
+          fi
+
+          echo "Service state now:"
+          docker run --rm -i -e SUPABASE_DB_URL "$PG_IMAGE" \
+              sh -c 'psql "$SUPABASE_DB_URL" -v ON_ERROR_STOP=1 -X -q' <<'SQL'
+          select state, message, changed_at from public.service_status;
+          SQL
