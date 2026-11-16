@@ -2,6 +2,9 @@
 
 # Crewgrain
 
+[![CI](https://github.com/BiswasSekhar/crewgrain/actions/workflows/ci.yml/badge.svg)](https://github.com/BiswasSekhar/crewgrain/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 **Daily work, production records and approvals for teams.**
 
 Crewgrain is an open-source, mobile-first operations app built with Expo, React

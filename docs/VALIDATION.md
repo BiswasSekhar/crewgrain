@@ -7,6 +7,7 @@ Checked locally on 17 November 2026 with Node 24.14.0 and npm 11.9.0.
 | Dependency install | Passed with lockfile |
 | Expo compatibility | Passed; Expo 58.0.25 and SQLite 58.0.17 |
 | Lint and application typecheck | Passed |
+| Deno checks | Both device-access and send-push passed with Deno 2.9.6 |
 | Tests | 232 passed across 34 files with two workers |
 | Web export | Passed |
 | Android JavaScript/Hermes export | Passed |
